@@ -8,11 +8,11 @@
 ## Note: the spanmetrics exporter must be included in the exporters array
 ## if overriding the traces pipeline.
 ##
-#  exporters:
-#    otlphttp/example:
-#      endpoint: <your-endpoint-url>
+#exporters:
+#  otlphttp/example:
+#    endpoint: https://otlp-gateway-prod-eu-west-2.grafana.net/otlp
 #
-#  service:
-#    pipelines:
-#      traces:
-#        exporters: [spanmetrics, otlphttp/example]
+#service:
+#  pipelines:
+#    traces:
+#      exporters: [spanmetrics, otlphttp/example]

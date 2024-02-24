@@ -1,5 +1,18 @@
 # Copyright The OpenTelemetry Authors
 # SPDX-License-Identifier: Apache-2.0
+extensions:
+  basicauth/otlp:
+    client_auth:
+      username: 631637
+      password: glc_eyJvIjoiODQ1OTA3IiwibiI6InN0YWNrLTYzMTYzNy1vdGxwLXdyaXRlLWdyYWZhbmEtYWdlbnQtMiIsImsiOiJxOTI4S25IMHM5OGhwMmF6YjRRUHUyMksiLCJtIjp7InIiOiJwcm9kLWV1LXdlc3QtMiJ9fQ==
+  basicauth/prw:
+    client_auth:
+      username: 964137
+      password: glc_eyJvIjoiODQ1OTA3IiwibiI6InN0YWNrLTYzMTYzNy1vdGxwLXdyaXRlLWdyYWZhbmEtYWdlbnQtMiIsImsiOiJxOTI4S25IMHM5OGhwMmF6YjRRUHUyMksiLCJtIjp7InIiOiJwcm9kLWV1LXdlc3QtMiJ9fQ==
+  basicauth/loki:
+    client_auth:
+      username: 584685
+      password: glc_eyJvIjoiODQ1OTA3IiwibiI6InN0YWNrLTYzMTYzNy1vdGxwLXdyaXRlLWdyYWZhbmEtYWdlbnQtMiIsImsiOiJxOTI4S25IMHM5OGhwMmF6YjRRUHUyMksiLCJtIjp7InIiOiJwcm9kLWV1LXdlc3QtMiJ9fQ==
 
 receivers:
   otlp:
@@ -16,14 +29,25 @@ receivers:
 
 exporters:
   debug:
-  otlp:
-    endpoint: "jaeger:4317"
+  otlphttp:
+    endpoint: "https://otlp-gateway-prod-eu-west-2.grafana.net/otlp"
+    auth:
+      authenticator: basicauth/otlp
     tls:
-      insecure: true
-  otlphttp/prometheus:
-    endpoint: "http://prometheus:9090/api/v1/otlp"
+      insecure: false
+  loki:
+    endpoint: https://@logs-prod-012.grafana.net/loki/api/v1/push
+    default_labels_enabled:
+      exporter: false
+      job: true
+    auth:
+      authenticator: basicauth/loki
+  prometheusremotewrite:
+    endpoint: "https://prometheus-prod-24-prod-eu-west-2.grafana.net:443/api/prom/push"
+    auth:
+      authenticator: basicauth/prw
     tls:
-      insecure: true
+      insecure: false
   opensearch:
     logs_index: otel
     http:
@@ -33,21 +57,36 @@ exporters:
 
 processors:
   batch:
+  attributes:
+    actions:
+      - action: insert
+        key: loki.attribute.labels
+        value: event.domain, event.name
+
+  resource:
+    attributes:
+      - action: insert
+        key: loki.resource.labels
+        value: service.name, service.namespace
+      - action: insert
+        key: loki.format
+        value: logfmt
 
 connectors:
   spanmetrics:
 
 service:
+  extensions: [basicauth/otlp, basicauth/prw, basicauth/loki]
   pipelines:
     traces:
       receivers: [otlp]
       processors: [batch]
-      exporters: [otlp, debug, spanmetrics]
+      exporters: [otlphttp, debug, spanmetrics]
     metrics:
       receivers: [httpcheck/frontendproxy, otlp, spanmetrics]
       processors: [batch]
-      exporters: [otlphttp/prometheus, debug]
+      exporters: [prometheusremotewrite, debug]
     logs:
       receivers: [otlp]
       processors: [batch]
-      exporters: [opensearch, debug]
+      exporters: [opensearch, debug, loki]

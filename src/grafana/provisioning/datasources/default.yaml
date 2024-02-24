@@ -5,17 +5,56 @@
 apiVersion: 1
 
 datasources:
-  - name: Prometheus
-    uid: webstore-metrics
+  - name: Mimir
+    uid: mimir
     type: prometheus
-    url: http://prometheus:9090
+    url: http://mimir:9009/prometheus
     editable: true
     isDefault: true
     jsonData:
       exemplarTraceIdDestinations:
-        - datasourceUid: webstore-traces
+        - datasourceUid: tempo
           name: trace_id
 
-        - url: http://localhost:8080/jaeger/ui/trace/$${__value.raw}
+        - url: http://tempo:3200/trace/$${__value.raw}
           name: trace_id
           urlDisplayLabel: View in Jaeger UI
+  - name: Loki
+    type: loki
+    uid: loki
+    access: proxy
+    url: http://loki:3100
+    basicAuth: false
+    version: 1
+    editable: true
+    jsonData:
+      maxLines: 1000
+      derivedFields:
+        # Field with internal link pointing to data source in Grafana.
+        # datasourceUid value can be anything, but it should be unique across all defined data source uids.
+        - datasourceUid: my_trace_uid
+          matcherRegex: "traceID=(\\w+)"
+          name: TraceID
+          # url will be interpreted as query for the datasource
+          url: '$${__value.raw}'
+          # optional for URL Label to set a custom display label for the link.
+          urlDisplayLabel: 'View Trace'
+
+        # Field with external link.
+        - matcherRegex: "traceID=(\\w+)"
+          name: TraceID
+          url: http://tempo:3200/trace/$${__value.raw}
+  - name: Tempo
+    type: tempo
+    access: proxy
+    orgId: 1
+    url: http://tempo:3200
+    basicAuth: false
+    version: 1
+    editable: true
+    apiVersion: 1
+    uid: tempo
+    jsonData:
+      httpMethod: GET
+      serviceMap:
+        datasourceUid: prometheus

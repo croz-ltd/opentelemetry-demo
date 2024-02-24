@@ -1,0 +1,84 @@
+prometheus.remote_write "local" {
+  endpoint {
+    url = "http://mimir:9009/api/v1/push"
+  }
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}
+
+otelcol.exporter.otlp "local" {
+  client {
+    endpoint = "tempo:4317"
+    tls {
+        insecure             = true
+        insecure_skip_verify = true
+    }
+  }
+}
+
+otelcol.exporter.prometheus "to_prometheus" {
+  forward_to = [
+    prometheus.remote_write.local.receiver,
+  ]
+}
+
+otelcol.exporter.loki "default" {
+  forward_to = [loki.write.local.receiver]
+}
+
+otelcol.receiver.otlp "default" {
+  grpc { }
+  http { }
+  output {
+    metrics = [otelcol.processor.batch.default.input]
+    logs    = [otelcol.processor.batch.default.input]
+    traces  = [otelcol.processor.batch.default.input]
+  }
+}
+
+otelcol.processor.batch "default" {
+  output {
+    metrics = [otelcol.exporter.prometheus.to_prometheus.input]
+    logs = [otelcol.exporter.loki.default.input]
+    traces = [otelcol.exporter.otlp.local.input]
+  }
+}
+
+prometheus.scrape "metrics_default_mimir" {
+	targets = [{
+		__address__ = "mimir:9009",
+	}]
+	forward_to = [prometheus.remote_write.local.receiver]
+	job_name   = "mimir"
+}
+
+prometheus.scrape "metrics_default_tempo" {
+	targets = [{
+		__address__ = "tempo:3200",
+	}]
+	forward_to = [prometheus.remote_write.local.receiver]
+	job_name   = "tempo"
+}
+
+prometheus.scrape "metrics_default_loki" {
+	targets = [{
+		__address__ = "loki:3100",
+	}]
+	forward_to = [prometheus.remote_write.local.receiver]
+	job_name   = "loki"
+}
+
+
+logging {
+	level = "debug"
+}
+
+otelcol.exporter.logging "default" {
+    verbosity           = "detailed"
+    sampling_initial    = 1
+    sampling_thereafter = 1
+}
