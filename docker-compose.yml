@@ -868,7 +868,7 @@ services:
       - run
       - /etc/agent/config.river
     ports:
-      - "8081:12345"
+      - "12345:12345"
       - "4317:4317"
       - "4318:4318"
     logging: *logging

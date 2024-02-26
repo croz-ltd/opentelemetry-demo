@@ -1,3 +1,10 @@
+prometheus.exporter.agent "local" {
+}
+prometheus.scrape "demo" {
+  targets    = prometheus.exporter.agent.local.targets
+  forward_to = [prometheus.remote_write.local.receiver]
+}
+
 prometheus.remote_write "local" {
   endpoint {
     url = "http://mimir:9009/api/v1/push"
@@ -43,7 +50,7 @@ otelcol.receiver.otlp "default" {
 otelcol.processor.batch "default" {
   output {
     metrics = [otelcol.exporter.prometheus.to_prometheus.input]
-    logs = [otelcol.exporter.loki.default.input]
+    logs = [otelcol.processor.attributes.default.input]
     traces = [otelcol.exporter.otlp.local.input]
   }
 }
@@ -81,4 +88,22 @@ otelcol.exporter.logging "default" {
     verbosity           = "detailed"
     sampling_initial    = 1
     sampling_thereafter = 1
+}
+
+otelcol.processor.attributes "default" {
+  action {
+    key = "loki.attribute.labels"
+    action = "insert"
+    value = "event.domain, event.name"
+  }
+
+  action {
+    key = "loki.resource.labels"
+    action = "insert"
+    value = "service.name, service.namespace"
+  }
+
+  output {
+    logs = [otelcol.exporter.loki.default.input]
+  }
 }
