@@ -1776,7 +1776,7 @@
         "type": "prometheus",
         "uid": "mimir"
       },
-      "description": "Sent by Exporter\notelcol_exporter_send_failed_spans",
+      "description": "Sent by Exporter\notelcol_exporter_send_failed_metric_points",
       "fieldConfig": {
         "defaults": {
           "color": {

@@ -26,6 +26,9 @@ receivers:
   httpcheck/frontendproxy:
     targets:
       - endpoint: http://frontendproxy:${env:ENVOY_PORT}
+  redis:
+    endpoint: "redis-cart:6379"
+    collection_interval: 10s
 
 exporters:
   debug:
@@ -83,7 +86,7 @@ service:
       processors: [batch]
       exporters: [otlphttp, debug, spanmetrics]
     metrics:
-      receivers: [httpcheck/frontendproxy, otlp, spanmetrics]
+      receivers: [httpcheck/frontendproxy, redis, otlp, spanmetrics]
       processors: [batch]
       exporters: [prometheusremotewrite, debug]
     logs:

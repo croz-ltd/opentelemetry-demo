@@ -15,15 +15,20 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
+	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/IBM/sarama"
 	"github.com/google/uuid"
+	otelhooks "github.com/open-feature/go-sdk-contrib/hooks/open-telemetry/pkg"
+	flagd "github.com/open-feature/go-sdk-contrib/providers/flagd/pkg"
+	"github.com/open-feature/go-sdk/openfeature"
 	"github.com/sirupsen/logrus"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel"
+	otelcodes "go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/propagation"
@@ -155,6 +160,9 @@ func main() {
 		log.Fatal(err)
 	}
 
+	openfeature.SetProvider(flagd.NewProvider())
+	openfeature.AddHooks(otelhooks.NewTracesHook())
+
 	tracer = tp.Tracer("checkoutservice")
 
 	svc := new(checkoutService)
@@ -242,7 +250,7 @@ func (cs *checkoutService) PlaceOrder(ctx context.Context, req *pb.PlaceOrderReq
 	var err error
 	defer func() {
 		if err != nil {
-			span.AddEvent("error", trace.WithAttributes(attribute.String("exception.message", err.Error())))
+			span.AddEvent("error", trace.WithAttributes(semconv.ExceptionMessageKey.String(err.Error())))
 		}
 	}()
 
@@ -310,7 +318,8 @@ func (cs *checkoutService) PlaceOrder(ctx context.Context, req *pb.PlaceOrderReq
 
 	// send to kafka only if kafka broker address is set
 	if cs.kafkaBrokerSvcAddr != "" {
-		cs.sendToPostProcessor(orderResult)
+		log.Infof("sending to postProcessor")
+		cs.sendToPostProcessor(ctx, orderResult)
 	}
 
 	resp := &pb.PlaceOrderResponse{Order: orderResult}
@@ -432,7 +441,14 @@ func (cs *checkoutService) convertCurrency(ctx context.Context, from *pb.Money, 
 }
 
 func (cs *checkoutService) chargeCard(ctx context.Context, amount *pb.Money, paymentInfo *pb.CreditCardInfo) (string, error) {
-	paymentResp, err := cs.paymentSvcClient.Charge(ctx, &pb.ChargeRequest{
+	paymentService := cs.paymentSvcClient
+	if cs.isFeatureFlagEnabled(ctx, "paymentServiceUnreachable") {
+		badAddress := "badAddress:50051"
+		c := mustCreateClient(context.Background(), badAddress)
+		paymentService = pb.NewPaymentServiceClient(c)
+	}
+
+	paymentResp, err := paymentService.Charge(ctx, &pb.ChargeRequest{
 		Amount:     amount,
 		CreditCard: paymentInfo})
 	if err != nil {
@@ -473,7 +489,7 @@ func (cs *checkoutService) shipOrder(ctx context.Context, address *pb.Address, i
 	return resp.GetTrackingId(), nil
 }
 
-func (cs *checkoutService) sendToPostProcessor(result *pb.OrderResult) {
+func (cs *checkoutService) sendToPostProcessor(ctx context.Context, result *pb.OrderResult) {
 	message, err := proto.Marshal(result)
 	if err != nil {
 		log.Errorf("Failed to marshal message to protobuf: %+v", err)
@@ -485,7 +501,111 @@ func (cs *checkoutService) sendToPostProcessor(result *pb.OrderResult) {
 		Value: sarama.ByteEncoder(message),
 	}
 
-	cs.KafkaProducerClient.Input() <- &msg
-	successMsg := <-cs.KafkaProducerClient.Successes()
-	log.Infof("Successful to write message. offset: %v", successMsg.Offset)
+	// Inject tracing info into message
+	span := createProducerSpan(ctx, &msg)
+	defer span.End()
+
+	// Send message and handle response
+	startTime := time.Now()
+	select {
+	case cs.KafkaProducerClient.Input() <- &msg:
+		log.Infof("Message sent to Kafka: %v", msg)
+		select {
+		case successMsg := <-cs.KafkaProducerClient.Successes():
+			span.SetAttributes(
+				attribute.Bool("messaging.kafka.producer.success", true),
+				attribute.Int("messaging.kafka.producer.duration_ms", int(time.Since(startTime).Milliseconds())),
+				attribute.KeyValue(semconv.MessagingKafkaMessageOffset(int(successMsg.Offset))),
+			)
+			log.Infof("Successful to write message. offset: %v, duration: %v", successMsg.Offset, time.Since(startTime))
+		case errMsg := <-cs.KafkaProducerClient.Errors():
+			span.SetAttributes(
+				attribute.Bool("messaging.kafka.producer.success", false),
+				attribute.Int("messaging.kafka.producer.duration_ms", int(time.Since(startTime).Milliseconds())),
+			)
+			span.SetStatus(otelcodes.Error, errMsg.Err.Error())
+			log.Errorf("Failed to write message: %v", errMsg.Err)
+		case <-ctx.Done():
+			span.SetAttributes(
+				attribute.Bool("messaging.kafka.producer.success", false),
+				attribute.Int("messaging.kafka.producer.duration_ms", int(time.Since(startTime).Milliseconds())),
+			)
+			span.SetStatus(otelcodes.Error, "Context cancelled: "+ctx.Err().Error())
+			log.Warnf("Context canceled before success message received: %v", ctx.Err())
+		}
+	case <-ctx.Done():
+		span.SetAttributes(
+			attribute.Bool("messaging.kafka.producer.success", false),
+			attribute.Int("messaging.kafka.producer.duration_ms", int(time.Since(startTime).Milliseconds())),
+		)
+		span.SetStatus(otelcodes.Error, "Failed to send: "+ctx.Err().Error())
+		log.Errorf("Failed to send message to Kafka within context deadline: %v", ctx.Err())
+		return
+	}
+
+	ffValue := cs.getIntFeatureFlag(ctx, "kafkaQueueProblems")
+	if ffValue > 0 {
+		log.Infof("Warning: FeatureFlag 'kafkaQueueProblems' is activated, overloading queue now.")
+		for i := 0; i < ffValue; i++ {
+			go func(i int) {
+				cs.KafkaProducerClient.Input() <- &msg
+				_ = <-cs.KafkaProducerClient.Successes()
+			}(i)
+		}
+		log.Infof("Done with #%d messages for overload simulation.", ffValue)
+	}
+}
+
+func createProducerSpan(ctx context.Context, msg *sarama.ProducerMessage) trace.Span {
+	spanContext, span := tracer.Start(
+		ctx,
+		fmt.Sprintf("%s publish", msg.Topic),
+		trace.WithSpanKind(trace.SpanKindProducer),
+		trace.WithAttributes(
+			semconv.PeerService("kafka"),
+			semconv.NetworkTransportTCP,
+			semconv.MessagingSystemKafka,
+			semconv.MessagingDestinationName(msg.Topic),
+			semconv.MessagingOperationPublish,
+			semconv.MessagingKafkaDestinationPartition(int(msg.Partition)),
+		),
+	)
+
+	carrier := propagation.MapCarrier{}
+	propagator := otel.GetTextMapPropagator()
+	propagator.Inject(spanContext, carrier)
+
+	for key, value := range carrier {
+		msg.Headers = append(msg.Headers, sarama.RecordHeader{Key: []byte(key), Value: []byte(value)})
+	}
+
+	return span
+}
+
+func (cs *checkoutService) isFeatureFlagEnabled(ctx context.Context, featureFlagName string) bool {
+	client := openfeature.NewClient("checkout")
+
+	// Default value is set to false, but you could also make this a parameter.
+	featureEnabled, _ := client.BooleanValue(
+		ctx,
+		featureFlagName,
+		false,
+		openfeature.EvaluationContext{},
+	)
+
+	return featureEnabled
+}
+
+func (cs *checkoutService) getIntFeatureFlag(ctx context.Context, featureFlagName string) int {
+	client := openfeature.NewClient("checkout")
+
+	// Default value is set to 0, but you could also make this a parameter.
+	featureFlagValue, _ := client.IntValue(
+		ctx,
+		featureFlagName,
+		0,
+		openfeature.EvaluationContext{},
+	)
+
+	return int(featureFlagValue)
 }
